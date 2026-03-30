@@ -129,6 +129,7 @@ RUN git clone https://github.com/SMRT-AIST/fast_gicp.git --recursive
 RUN git clone https://github.com/ethz-asl/image_undistort.git
 
 # Additional dependencies for CMRNext
+RUN python3 -m pip install --no-cache-dir "setuptools<71" "importlib-metadata>=4.6,<8"
 RUN pip3 install numpy==1.20.3 scikit-image pyquaternion mathutils==2.81.2 tqdm python-dateutil==2.8.2 open3d pillow==10.3.0
 
 # Create catkin workspace and copy calibration codes
