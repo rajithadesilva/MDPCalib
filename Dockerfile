@@ -43,7 +43,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends libopencv-dev p
 # Additional ROS packages
 RUN apt-get update && apt-get install -y ros-noetic-rviz python3-catkin-tools ros-noetic-tf-conversions ros-noetic-tf2-sensor-msgs ros-noetic-image-transport-plugins ros-noetic-rqt-image-view ros-noetic-message-filters python3-rospy python3-message-filters python3-sensor-msgs python3-pip ros-noetic-geodesy ros-noetic-nmea-msgs ros-noetic-libg2o
 RUN apt-get update && apt-get install -y ros-noetic-ros-numpy
-RUN pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+RUN python3 -m pip install --no-cache-dir --upgrade "pip<25" setuptools wheel && \
+    python3 -m pip install --no-cache-dir "typing-extensions<4.13" && \
+    python3 -m pip install --no-cache-dir \
+    torch==1.11.0+cu113 \
+    torchvision==0.12.0+cu113 \
+    torchaudio==0.11.0 \
+    --extra-index-url https://download.pytorch.org/whl/cu113
 
 RUN apt-get update && apt-get install -y unzip ros-noetic-hector-trajectory-server ros-noetic-image-pipeline
 
