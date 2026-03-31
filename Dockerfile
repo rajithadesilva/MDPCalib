@@ -43,13 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libopencv-dev p
 # Additional ROS packages
 RUN apt-get update && apt-get install -y ros-noetic-rviz python3-catkin-tools ros-noetic-tf-conversions ros-noetic-tf2-sensor-msgs ros-noetic-image-transport-plugins ros-noetic-rqt-image-view ros-noetic-message-filters python3-rospy python3-message-filters python3-sensor-msgs python3-pip ros-noetic-geodesy ros-noetic-nmea-msgs ros-noetic-libg2o
 RUN apt-get update && apt-get install -y ros-noetic-ros-numpy
-RUN python3 -m pip install --no-cache-dir --upgrade "pip<25" setuptools wheel && \
-    python3 -m pip install --no-cache-dir "typing-extensions<4.13" && \
-    python3 -m pip install --no-cache-dir \
-    torch==1.11.0+cu113 \
-    torchvision==0.12.0+cu113 \
-    torchaudio==0.11.0 \
-    --extra-index-url https://download.pytorch.org/whl/cu113
+RUN pip3 install typing_extensions==4.8.0 torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
 
 RUN apt-get update && apt-get install -y unzip ros-noetic-hector-trajectory-server ros-noetic-image-pipeline
 
@@ -111,7 +105,7 @@ COPY --from=orb_slam3_dependencies /root/ORB_SLAM3/ /root/ORB_SLAM3/
 RUN cd /root/Pangolin/build && cmake --install .
 RUN cd /root/opencv/build && cmake --install .
 RUN cd /root/ceres-solver/bin && make install
-RUN cd /root/ORB_SLAM3/ && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j8
+RUN cd /root/ORB_SLAM3/ && mkdir -p build && cd build && cmake .. -DOpenCV_DIR=/usr/local/lib/cmake/opencv4 -DCMAKE_BUILD_TYPE=Release && make -j8
 
 WORKDIR /
 RUN touch /root/.bashrc
@@ -129,7 +123,6 @@ RUN git clone https://github.com/SMRT-AIST/fast_gicp.git --recursive
 RUN git clone https://github.com/ethz-asl/image_undistort.git
 
 # Additional dependencies for CMRNext
-RUN python3 -m pip install --no-cache-dir "setuptools<71" "importlib-metadata>=4.6,<8"
 RUN pip3 install numpy==1.20.3 scikit-image pyquaternion mathutils==2.81.2 tqdm python-dateutil==2.8.2 open3d pillow==10.3.0
 
 # Create catkin workspace and copy calibration codes
