@@ -55,6 +55,27 @@ Optimizer::Optimizer(ros::NodeHandle* nh, const std::string& calibration_options
         cache_folder_path_ += "/";
     }
 
+    // Parse skip_initial_calibration flag and initial calibration values
+    skip_initial_calibration_ = false;
+    if (node["optimization"]["skip_initial_calibration"]) {
+        skip_initial_calibration_ = node["optimization"]["skip_initial_calibration"].as<bool>();
+    }
+    if (skip_initial_calibration_ && node["optimization"]["initial_calibration"]) {
+        auto init_calib = node["optimization"]["initial_calibration"];
+        extrinsics_->p.x() = init_calib["tx"].as<double>();
+        extrinsics_->p.y() = init_calib["ty"].as<double>();
+        extrinsics_->p.z() = init_calib["tz"].as<double>();
+        extrinsics_->q.w() = init_calib["qw"].as<double>();
+        extrinsics_->q.x() = init_calib["qx"].as<double>();
+        extrinsics_->q.y() = init_calib["qy"].as<double>();
+        extrinsics_->q.z() = init_calib["qz"].as<double>();
+        ROS_INFO_STREAM("Skipping initial calibration. Using values from config file."
+                        << "\nTranslation: (" << extrinsics_->p.x() << ", " << extrinsics_->p.y() << ", "
+                        << extrinsics_->p.z() << ")"
+                        << "\nRotation (qx,qy,qz,qw): (" << extrinsics_->q.x() << ", " << extrinsics_->q.y() << ", "
+                        << extrinsics_->q.z() << ", " << extrinsics_->q.w() << ")");
+    }
+
     // Create run directories
     io_utils_ = IOUtils(node["io"]["path_base"].as<std::string>(), node["io"]["run_name"].as<std::string>());
     io_utils_.createRunDirectories();
@@ -175,7 +196,53 @@ void Optimizer::CachePosesCallback(const calib_msgs::StringStampedConstPtr& pose
             synced_poses_filename_subscriber_->shutdown();
         }
 
-        ComputeInitialTransform();
+        if (skip_initial_calibration_) {
+            ROS_INFO_STREAM("Skipping initial hand-eye calibration. Publishing YAML-loaded extrinsics.");
+
+            // Log the initial calibration from YAML
+            std::stringstream initStream;
+            initStream << "Initial extrinsics (from YAML config) as translation vector (x,y,z) and quaternion "
+                          "(x,y,z,w)\nTranslation: ("
+                       << extrinsics_->p.x() << ", " << extrinsics_->p.y() << ", " << extrinsics_->p.z()
+                       << ")\nRotation:    (" << extrinsics_->q.x() << ", " << extrinsics_->q.y() << ", "
+                       << extrinsics_->q.z() << ", " << extrinsics_->q.w() << ")"
+                       << "\n\n"
+                       << "Initial transform as pose matrix: "
+                       << "\n"
+                       << extrinsics_->ToPoseMatrix() << "\n\n";
+            ROS_INFO_STREAM(initStream.str());
+            io_utils_.writeResults(initStream);
+
+            // Initialize scales for the refinement step (one per pose pair)
+            for (size_t i = 0; i < synced_poses_filenames_.size() - 1; i++) {
+                scales_.push_back(std::make_shared<double>(10.0));
+            }
+
+            // Publish meta data so CMRNext knows the sequence range
+            calib_msgs::UInt16MultiArrayStamped initial_transform_meta_msg;
+            initial_transform_meta_msg.data.layout.dim.push_back(std_msgs::MultiArrayDimension());
+            initial_transform_meta_msg.data.layout.dim[0].size = 2;
+            initial_transform_meta_msg.data.layout.dim[0].stride = 1;
+            initial_transform_meta_msg.data.layout.dim[0].label = "seq";
+            initial_transform_meta_msg.data.data.push_back(synced_poses_filenames_.front().second);
+            initial_transform_meta_msg.data.data.push_back(synced_poses_filenames_.back().second);
+            initial_transform_meta_msg.header.stamp = ros::Time::now();
+            initial_transform_meta_pub_.publish(initial_transform_meta_msg);
+
+            // Publish the initial transform to CMRNext
+            geometry_msgs::TransformStamped initial_transform_msg;
+            initial_transform_msg.transform.translation.x = extrinsics_->p.x();
+            initial_transform_msg.transform.translation.y = extrinsics_->p.y();
+            initial_transform_msg.transform.translation.z = extrinsics_->p.z();
+            initial_transform_msg.transform.rotation.x = extrinsics_->q.x();
+            initial_transform_msg.transform.rotation.y = extrinsics_->q.y();
+            initial_transform_msg.transform.rotation.z = extrinsics_->q.z();
+            initial_transform_msg.transform.rotation.w = extrinsics_->q.w();
+            initial_transform_msg.header.stamp = ros::Time::now();
+            initial_transform_pub_.publish(initial_transform_msg);
+        } else {
+            ComputeInitialTransform();
+        }
     }
 }
 
