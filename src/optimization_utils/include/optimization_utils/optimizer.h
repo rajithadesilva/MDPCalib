@@ -115,6 +115,7 @@ class Optimizer : public CeresBase {
     int skip_n_poses_;       // Number of initial poses to skip before caching
     int skip_counter_;
     int number_used_pairs_;  // Number of image - point cloud pairs used for refined optimization
+    bool skip_initial_calibration_;  // Skip initial hand-eye calibration and use YAML values
 
     // Cache the correspondences
     Correspondence2D3D correspondences_;
