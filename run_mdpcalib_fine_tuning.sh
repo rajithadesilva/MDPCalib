@@ -53,6 +53,8 @@ echo \"[attach_mdpcalib_ft] Cleaning data/experiments/*\"; \
 rm -rf data/experiments/*; \
 echo \"[attach_mdpcalib_ft] Enabling skip_initial_calibration in config...\"; \
 sed -i 's/skip_initial_calibration: false/skip_initial_calibration: true/' \$(rospack find calib_cfg)/config/config.yaml; \
+echo \"[attach_mdpcalib_ft] Enabling error map sampling in config...\"; \
+sed -i 's/use_error_map_sampling: false/use_error_map_sampling: true/' \$(rospack find calib_cfg)/config/config.yaml; \
 roslaunch optimization_utils optimizer_fine_tuning.launch; \
 exec bash"
         ;;
