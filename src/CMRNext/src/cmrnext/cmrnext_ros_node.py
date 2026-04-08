@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -52,6 +53,10 @@ class CMRNextNode:
         self.use_uncertainty = False
         # Img-Pcl pairs with an estimated yaw above this threshold are not processed. In degree.
         self.rotation_threshold = np.inf
+        # Error map guided sampling
+        self.use_error_map_sampling = False
+        self.error_map_u_dir = ""
+        self.error_map_v_dir = ""
         self.final_calibs = []
 
         self.synced_data_filename_subscriber: message_filters.Subscriber = None
@@ -214,7 +219,7 @@ class CMRNextNode:
             self._process_buffer()
 
     def _process_buffer(self) -> None:
-        for [filename, _] in tqdm(self.synced_data_filename_buffer,
+        for [filename, header] in tqdm(self.synced_data_filename_buffer,
                                   total=len(self.synced_data_filename_buffer),
                                   desc="Generating 2D-3D correpondences"):
 
@@ -243,9 +248,45 @@ class CMRNextNode:
             # Subsample correspondences
             number_of_samples = int(correspondences_img.shape[1] * self.amount_correspondences /
                                     100)
-            if uncertainties is not None:
+
+            # Determine sampling probabilities
+            probabilities = None
+            if self.use_error_map_sampling:
+                # Load precomputed error maps for this frame
+                seq = header.seq
+                u_path = os.path.join(self.error_map_u_dir, f"{seq:06d}.npz")
+                v_path = os.path.join(self.error_map_v_dir, f"{seq:06d}.npz")
+                if os.path.exists(u_path) and os.path.exists(v_path):
+                    u_data = np.load(u_path)
+                    v_data = np.load(v_path)
+                    u_err = u_data[list(u_data.keys())[0]]
+                    v_err = v_data[list(v_data.keys())[0]]
+                    # Combined error magnitude per pixel
+                    error_map = np.sqrt(u_err.astype(np.float64)**2 +
+                                        v_err.astype(np.float64)**2)
+                    # Look up error at each correspondence pixel location
+                    # correspondences_img: (2, N) with row 0 = x (col), row 1 = y (row)
+                    px_x = correspondences_img[0].astype(int)
+                    px_y = correspondences_img[1].astype(int)
+                    # Clamp to image bounds
+                    px_y = np.clip(px_y, 0, error_map.shape[0] - 1)
+                    px_x = np.clip(px_x, 0, error_map.shape[1] - 1)
+                    per_point_error = error_map[px_y, px_x]
+                    # Confidence = inverse error (higher error → lower probability)
+                    epsilon = 1e-6
+                    probabilities = 1.0 / (per_point_error + epsilon)
+                    probabilities /= probabilities.sum()
+                    rospy.loginfo(f"Using error map sampling for seq {seq} "
+                                  f"(error range: [{per_point_error.min():.3f}, "
+                                  f"{per_point_error.max():.3f}])")
+                else:
+                    rospy.logwarn(f"Error map not found for seq {seq}, "
+                                  f"falling back to uniform sampling.")
+            elif uncertainties is not None:
                 probabilities = 1 / uncertainties
                 probabilities /= probabilities.sum()
+
+            if probabilities is not None:
                 keep_indices = self.rng.choice(correspondences_img.shape[1],
                                                number_of_samples,
                                                replace=False,
@@ -347,6 +388,20 @@ class CMRNextNode:
                 calibration_options["cmrnext"]["amount_correspondences"]
             self.rotation_threshold = \
                 calibration_options["cmrnext"]["rotation_threshold"]
+
+            # Error map guided sampling config
+            if "use_error_map_sampling" in calibration_options["cmrnext"]:
+                self.use_error_map_sampling = \
+                    calibration_options["cmrnext"]["use_error_map_sampling"]
+            if "error_map_u_dir" in calibration_options["cmrnext"]:
+                self.error_map_u_dir = \
+                    calibration_options["cmrnext"]["error_map_u_dir"]
+            if "error_map_v_dir" in calibration_options["cmrnext"]:
+                self.error_map_v_dir = \
+                    calibration_options["cmrnext"]["error_map_v_dir"]
+            if self.use_error_map_sampling:
+                rospy.loginfo(f"Error map sampling enabled. u_dir={self.error_map_u_dir}, "
+                              f"v_dir={self.error_map_v_dir}")
 
             # Compute the processing frequency based on the expected number of pair candidates
             self.pair_processing_frequency = \

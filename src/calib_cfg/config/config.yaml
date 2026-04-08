@@ -17,6 +17,9 @@ optimization:
 cmrnext:
   amount_correspondences: 5 # Percentage of correspondences per pair. Value in [0, 100].
   rotation_threshold: 50 # [Deg] Img-Pcl pairs with an estimated yaw (using LiDAR odometry) above this threshold are not processed.
+  use_error_map_sampling: true # Set to true to use precomputed error maps for weighted sampling
+  error_map_u_dir: "/data/flow_vis/flow_vis_kitti_00/u" # Directory with per-frame u-error .npz files
+  error_map_v_dir: "/data/flow_vis/flow_vis_kitti_00/v" # Directory with per-frame v-error .npz files
 
 io:
   cache_folder: "/data/cache"
