@@ -5,6 +5,7 @@ ENV DEBCONF_NONINTERACTIVE_SEEN true
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
 ENV ROS_DISTRO noetic
+ENV ROS2_DISTRO foxy
 
 RUN \
     # Update nvidia GPG key
@@ -30,6 +31,9 @@ RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C1CF6E31E6
 RUN echo "deb http://packages.ros.org/ros/ubuntu focal main" > /etc/apt/sources.list.d/ros1-latest.list
 RUN apt-get update && apt-get install -y --no-install-recommends ros-noetic-ros-core=1.5.0-1*
 RUN apt-get update && apt-get install -y --no-install-recommends nano build-essential git byobu curl xclip
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add -
+RUN echo "deb http://packages.ros.org/ros2/ubuntu focal main" > /etc/apt/sources.list.d/ros2.list
+RUN apt-get update && apt-get install -y --no-install-recommends ros-foxy-ros-base ros-foxy-ros1-bridge
 
 # ceres dependencies
 RUN apt-get update && apt-get install -y libgoogle-glog-dev libgflags-dev libatlas-base-dev libsuitesparse-dev libeigen3-dev
