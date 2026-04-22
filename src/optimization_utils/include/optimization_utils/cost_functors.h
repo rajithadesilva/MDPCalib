@@ -11,6 +11,27 @@
 
 namespace optimization_utils {
 
+namespace detail {
+
+template <typename Derived>
+bool AllFinite(const Eigen::MatrixBase<Derived>& value) {
+    for (Eigen::Index i = 0; i < value.size(); ++i) {
+        if (!ceres::isfinite(value.derived().coeff(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename T>
+void SetPenaltyResidual(const Matrix2d& weight, T* res) {
+    Eigen::Map<Eigen::Matrix<T, 2, 1>> residuals(res);
+    residuals.setConstant(T(1000.0));
+    residuals.applyOnTheLeft(weight.template cast<T>());
+}
+
+}  // namespace detail
+
 template <typename C>
 struct CostFunctorWeightedReprojection1d {
     CostFunctorWeightedReprojection1d(const double& w, std::unique_ptr<C>& ceres_projector)
@@ -205,18 +226,33 @@ struct CostFunctorPointReprojectionResidual : public CostFunctorWeightedReprojec
         // Map the data arrays to Eigen Objects
         Eigen::Map<const Eigen::Quaternion<T>> quat_cam(quat_cam_ptr);
         Eigen::Map<const Eigen::Matrix<T, 3, 1>> pos_cam(pos_cam_ptr);
+        Eigen::Map<Eigen::Matrix<T, 2, 1>> residuals(res);
 
         // Transform the 3d point into the camera frame
         Eigen::Matrix<T, 3, 1> pt_3d_in_cam_frame = quat_cam.conjugate() * (pt_3d_.template cast<T>() - pos_cam);
+        if (!detail::AllFinite(pt_3d_in_cam_frame) || pt_3d_in_cam_frame[2] <= T(1e-6)) {
+            detail::SetPenaltyResidual((this->w_), res);
+            return true;
+        }
 
         // Project the 3d point in the camera frame into the image
-        Eigen::Matrix<T, 2, 1> p_img_predicted(-1, -1);
-        (*(this->ceres_projector_))(pt_3d_in_cam_frame.data(), p_img_predicted.data());
+        Eigen::Matrix<T, 2, 1> p_img_predicted;
+        const bool projection_ok = (*(this->ceres_projector_))(pt_3d_in_cam_frame.data(), p_img_predicted.data());
+        if (!projection_ok || !detail::AllFinite(p_img_predicted)) {
+            detail::SetPenaltyResidual((this->w_), res);
+            return true;
+        }
 
         // Determine the weighted residual (measured 2d point - predicted 2d point)
-        Eigen::Map<Eigen::Matrix<T, 2, 1>> residuals(res);
         residuals.template block<2, 1>(0, 0) = p_img_predicted - p_img_meas_.template cast<T>();
+        if (!detail::AllFinite(residuals)) {
+            detail::SetPenaltyResidual((this->w_), res);
+            return true;
+        }
         residuals.applyOnTheLeft((this->w_).template cast<T>());
+        if (!detail::AllFinite(residuals)) {
+            detail::SetPenaltyResidual((this->w_), res);
+        }
         return true;
     }
 

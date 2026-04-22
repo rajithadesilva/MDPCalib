@@ -50,6 +50,7 @@ struct IOUtils{
     void copyFile(const fs::path& pathFileSrc, const fs::path& pathDirDist);
 
     void writeResults(std::stringstream& stream);
+    void writeResults(const std::string& text);
 
     void writeImage(const sensor_msgs::ImageConstPtr& img_msg);
 

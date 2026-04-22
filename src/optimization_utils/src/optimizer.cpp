@@ -6,7 +6,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Vector3Stamped.h>
-#include <math.h>
+#include <cmath>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/synchronizer.h>
@@ -20,6 +20,7 @@
 #include <eigen3/Eigen/Dense>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 
 #include "optimization_utils/ceres_base.h"
 #include "optimization_utils/config.h"
@@ -31,6 +32,45 @@
 // ToDo: Update the gt extrinsics
 
 namespace optimization_utils {
+
+namespace {
+
+constexpr double kMinQuaternionNorm = 1e-6;
+constexpr double kMinPositiveDepth = 1e-6;
+constexpr double kMaxSeededRefinementTranslationDriftMeters = 0.15;
+constexpr double kMaxSeededRefinementRotationDriftRad = 10.0 * M_PI / 180.0;
+
+bool IsFiniteQuaternion(const Quaterniond& quat) {
+    return std::isfinite(quat.x()) && std::isfinite(quat.y()) && std::isfinite(quat.z()) && std::isfinite(quat.w());
+}
+
+bool IsValidPose(const PosePQ& pose) {
+    return pose.p.allFinite() && IsFiniteQuaternion(pose.q) && pose.q.coeffs().norm() > kMinQuaternionNorm;
+}
+
+bool HasPositiveCameraDepth(const PosePQ& camera_pose, const Point3d& point) {
+    if (!IsValidPose(camera_pose) || !point.allFinite()) {
+        return false;
+    }
+
+    const Point3d point_in_camera = camera_pose.q.normalized().conjugate() * (point - camera_pose.p);
+    return point_in_camera.allFinite() && point_in_camera.z() > kMinPositiveDepth;
+}
+
+void PublishTransform(const ros::Publisher& publisher, const PosePQ& pose, const ros::Time& stamp) {
+    geometry_msgs::TransformStamped msg;
+    msg.transform.translation.x = pose.p.x();
+    msg.transform.translation.y = pose.p.y();
+    msg.transform.translation.z = pose.p.z();
+    msg.transform.rotation.x = pose.q.x();
+    msg.transform.rotation.y = pose.q.y();
+    msg.transform.rotation.z = pose.q.z();
+    msg.transform.rotation.w = pose.q.w();
+    msg.header.stamp = stamp.isZero() ? ros::Time::now() : stamp;
+    publisher.publish(msg);
+}
+
+}  // namespace
 
 Optimizer::Optimizer(ros::NodeHandle* nh, const std::string& calibration_options, const SolverOptions& solver_options,
                      const ceres::Problem::Options& problem_options)
@@ -109,13 +149,18 @@ void Optimizer::SetSubscriber(ros::Subscriber* const synced_poses_filename_subsc
 void Optimizer::CameraInfoCallback(const sensor_msgs::CameraInfoConstPtr& camera_info_msg) {
     ROS_INFO_STREAM("Received intrinsic calibration of camera");
 
-    camera_model_ = new CameraModelPinhole(camera_info_msg->width, camera_info_msg->height, camera_info_msg->P[0],
-                                           camera_info_msg->P[5], camera_info_msg->P[2], camera_info_msg->P[6]);
+    if (camera_model_ != nullptr) {
+        delete camera_model_;
+        camera_model_ = nullptr;
+    }
 
     // Hotfix for Argoverse2
     if (camera_info_msg->P[0] + camera_info_msg->P[5] + camera_info_msg->P[2] + camera_info_msg->P[6] < 10) {
         camera_model_ = new CameraModelPinhole(camera_info_msg->width, camera_info_msg->height, camera_info_msg->K[0],
                                                camera_info_msg->K[4], camera_info_msg->K[2], camera_info_msg->K[5]);
+    } else {
+        camera_model_ = new CameraModelPinhole(camera_info_msg->width, camera_info_msg->height, camera_info_msg->P[0],
+                                               camera_info_msg->P[5], camera_info_msg->P[2], camera_info_msg->P[6]);
     }
 
     int img_width, img_height;
@@ -302,9 +347,14 @@ void Optimizer::StoreInitVisuCallback(const sensor_msgs::ImageConstPtr& img_msg)
 }
 
 void Optimizer::SetGtExtrinsicsCallback(const geometry_msgs::PoseStamped& gt_extrinsics_msg) {
-    // ToDo: There should be an exception handler handling the case that extrinsics is not set
+    const PosePQ gt_candidate(gt_extrinsics_msg.pose);
+    if (!IsValidPose(gt_candidate)) {
+        ROS_WARN_STREAM("Ignoring invalid /gt_extrinsics pose.");
+        return;
+    }
+
     // Set gt extrinsics
-    this->gt_extrinsics_ = std::make_shared<PosePQ>(gt_extrinsics_msg.pose);
+    this->gt_extrinsics_ = std::make_shared<PosePQ>(gt_candidate);
 
     // Log GT calibration if existing
     std::stringstream gtStream;
@@ -322,7 +372,9 @@ void Optimizer::SetGtExtrinsicsCallback(const geometry_msgs::PoseStamped& gt_ext
     io_utils_.writeResults(gtStream);
 
     // Shut down subscriber
-    gt_extrinsics_subscriber_->shutdown();
+    if (gt_extrinsics_subscriber_ != nullptr) {
+        gt_extrinsics_subscriber_->shutdown();
+    }
 }
 
 void Optimizer::ComputeInitialTransform() {
@@ -337,6 +389,9 @@ void Optimizer::ComputeInitialTransform() {
     // These variables will containt loaded pose messages
     geometry_msgs::PoseStamped prev_camera_pose_msg, prev_lidar_pose_msg;
     geometry_msgs::PoseStamped camera_pose_msg, lidar_pose_msg;
+    size_t accepted_pose_pairs = 0;
+    size_t skipped_origin_pose_pairs = 0;
+    size_t skipped_invalid_pose_pairs = 0;
 
     // Read the 1st item (limit scope of variables)
     {
@@ -381,11 +436,25 @@ void Optimizer::ComputeInitialTransform() {
         PosePQ prev_camera_pose(prev_camera_pose_msg.pose);
         PosePQ prev_lidar_pose(prev_lidar_pose_msg.pose);
 
+        if (!IsValidPose(camera_pose) || !IsValidPose(lidar_pose) || !IsValidPose(prev_camera_pose) ||
+            !IsValidPose(prev_lidar_pose)) {
+            skipped_invalid_pose_pairs++;
+            ROS_WARN_STREAM("Skipping initial pose pair with seq " << filename->second
+                                                                   << " due to invalid pose data.");
+            prev_camera_pose_msg = camera_pose_msg;
+            prev_lidar_pose_msg = lidar_pose_msg;
+            continue;
+        }
+
         // If ORB-SLAM3 lost track (created new map), it resets the poses to the origin. To avoid computing a pose
         // difference between poses from different maps, we skip the poses if the current or previous one points to
         // the origin.
-        if (camera_pose.IsAtOrigin() || prev_camera_pose.IsAtOrigin()) {
+        if (camera_pose.IsAtOrigin() || prev_camera_pose.IsAtOrigin() || lidar_pose.IsAtOrigin() ||
+            prev_lidar_pose.IsAtOrigin()) {
+            skipped_origin_pose_pairs++;
             ROS_INFO_STREAM("Skip poses with seq " << filename->second);
+            prev_camera_pose_msg = camera_pose_msg;
+            prev_lidar_pose_msg = lidar_pose_msg;
             continue;
         }
 
@@ -408,10 +477,25 @@ void Optimizer::ComputeInitialTransform() {
         // Set up the optimization problem
         AddRotationConstraint(*rotation_constraints.back(), new ceres::CauchyLoss(0.000001));
         AddTranslationConstraint(*translation_constraints.back(), new ceres::CauchyLoss(0.000001));
+        accepted_pose_pairs++;
 
         // Set the current poses to the previous ones
         prev_camera_pose_msg = camera_pose_msg;
         prev_lidar_pose_msg = lidar_pose_msg;
+    }
+
+    std::stringstream init_pose_summary_stream;
+    init_pose_summary_stream << "Initial trajectory constraints: accepted " << accepted_pose_pairs
+                             << ", skipped invalid " << skipped_invalid_pose_pairs << ", skipped origin "
+                             << skipped_origin_pose_pairs << ".\n\n";
+    ROS_INFO_STREAM(init_pose_summary_stream.str());
+    io_utils_.writeResults(init_pose_summary_stream);
+
+    if (accepted_pose_pairs == 0) {
+        ROS_ERROR_STREAM("No valid pose pairs available for initial optimization. Shutting down optimizer.");
+        io_utils_.writeResults("No valid pose pairs available for initial optimization.\n\n");
+        ros::shutdown();
+        return;
     }
 
     // Publish the meta data, i.e., the sequence numbers to obtain the initial transform
@@ -427,6 +511,10 @@ void Optimizer::ComputeInitialTransform() {
 
     // Obtain the initial transform. Since this takes some time, we already sent the meta message.
     optimizeProblem();
+    std::stringstream init_solver_summary_stream;
+    init_solver_summary_stream << "Initial optimization summary: " << summary_.BriefReport() << "\n\n";
+    ROS_INFO_STREAM(init_solver_summary_stream.str());
+    io_utils_.writeResults(init_solver_summary_stream);
     static auto end_init_timer = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double, std::ratio<1>> duration_init = end_init_timer - start_init_timer;
     std::stringstream init_duration_stream;
@@ -466,17 +554,7 @@ void Optimizer::ComputeInitialTransform() {
     initial_transform->p = Point3d(pose_matrix_inv.block<3, 1>(0, 3));
 
     // Publish the initial transform
-    geometry_msgs::TransformStamped initial_transform_msg;
-
-    initial_transform_msg.transform.translation.x = initial_transform->p.x();
-    initial_transform_msg.transform.translation.y = initial_transform->p.y();
-    initial_transform_msg.transform.translation.z = initial_transform->p.z();
-    initial_transform_msg.transform.rotation.x = initial_transform->q.x();
-    initial_transform_msg.transform.rotation.y = initial_transform->q.y();
-    initial_transform_msg.transform.rotation.z = initial_transform->q.z();
-    initial_transform_msg.transform.rotation.w = initial_transform->q.w();
-    initial_transform_msg.header.stamp = camera_pose_msg.header.stamp;
-    initial_transform_pub_.publish(initial_transform_msg);
+    PublishTransform(initial_transform_pub_, *initial_transform, camera_pose_msg.header.stamp);
 }
 
 void Optimizer::ComputeRefinedTransform() {
@@ -490,6 +568,15 @@ void Optimizer::ComputeRefinedTransform() {
     ceres_problem_ptr_ = new ceres::Problem();
 
     auto& refined_transform = extrinsics_;
+    const PosePQ last_valid_transform(*refined_transform);
+    const auto publish_fallback_and_shutdown = [&](const std::string& reason, const ros::Time& stamp) {
+        ROS_WARN_STREAM(reason);
+        io_utils_.writeResults(reason + "\n\n");
+        PublishTransform(refined_transform_pub_, last_valid_transform, stamp);
+        ROS_INFO_STREAM("Done processing. Shutting down the optimizer node.");
+        ros::shutdown();
+    };
+
     // Allocate space for the optimization parameters
     std::vector<std::shared_ptr<TranslationConstraint>> translation_constraints;
     std::vector<std::shared_ptr<RotationConstraint>> rotation_constraints;
@@ -500,6 +587,14 @@ void Optimizer::ComputeRefinedTransform() {
     // These variables will containt loaded pose messages
     geometry_msgs::PoseStamped prev_camera_pose_msg, prev_lidar_pose_msg;
     geometry_msgs::PoseStamped camera_pose_msg, lidar_pose_msg;
+    size_t accepted_pose_pairs = 0;
+    size_t skipped_origin_pose_pairs = 0;
+    size_t skipped_invalid_pose_pairs = 0;
+    size_t accepted_img_constraints = 0;
+    size_t skipped_shape_mismatch_items = 0;
+    size_t skipped_invalid_img_constraints = 0;
+    size_t skipped_out_of_bounds_constraints = 0;
+    size_t skipped_negative_depth_constraints = 0;
 
     // Read the 1st item (limit scope of variables)
     {
@@ -545,11 +640,25 @@ void Optimizer::ComputeRefinedTransform() {
         PosePQ prev_camera_pose(prev_camera_pose_msg.pose);
         PosePQ prev_lidar_pose(prev_lidar_pose_msg.pose);
 
+        if (!IsValidPose(camera_pose) || !IsValidPose(lidar_pose) || !IsValidPose(prev_camera_pose) ||
+            !IsValidPose(prev_lidar_pose)) {
+            skipped_invalid_pose_pairs++;
+            ROS_WARN_STREAM("Skipping refined pose pair with seq " << filename->second
+                                                                   << " due to invalid pose data.");
+            prev_camera_pose_msg = camera_pose_msg;
+            prev_lidar_pose_msg = lidar_pose_msg;
+            continue;
+        }
+
         // If ORB-SLAM3 lost track (created new map), it resets the poses to the origin. To avoid computing a pose
         // difference between poses of different maps, we skip the poses if the current or previous one points to
         // the origin.
-        if (camera_pose.IsAtOrigin() || prev_camera_pose.IsAtOrigin()) {
-            ROS_INFO_STREAM("Skip poses with seq" << filename->second);
+        if (camera_pose.IsAtOrigin() || prev_camera_pose.IsAtOrigin() || lidar_pose.IsAtOrigin() ||
+            prev_lidar_pose.IsAtOrigin()) {
+            skipped_origin_pose_pairs++;
+            ROS_INFO_STREAM("Skip poses with seq " << filename->second);
+            prev_camera_pose_msg = camera_pose_msg;
+            prev_lidar_pose_msg = lidar_pose_msg;
             continue;
         }
 
@@ -564,6 +673,9 @@ void Optimizer::ComputeRefinedTransform() {
 
         // Set up the optimization parameters
         // ToDo: Reset attributes such as scale and stuff
+        if (scales_iter >= scales_.size()) {
+            scales_.push_back(std::make_shared<double>(10.0));
+        }
         rotation_constraints.push_back(std::make_shared<RotationConstraint>(odometry_map, refined_transform));
         translation_constraints.push_back(
             std::make_shared<TranslationConstraint>(odometry_map, refined_transform, scales_[scales_iter++]));
@@ -573,39 +685,94 @@ void Optimizer::ComputeRefinedTransform() {
                               true);  // Use inverse cost function
         AddTranslationConstraint(*translation_constraints.back(), new ceres::CauchyLoss(0.000001),
                                  true);  // Use inverse cost function
+        accepted_pose_pairs++;
 
         // Set the current poses to the previous ones
         prev_camera_pose_msg = camera_pose_msg;
         prev_lidar_pose_msg = lidar_pose_msg;
     }
 
+    std::stringstream refine_pose_summary_stream;
+    refine_pose_summary_stream << "Refined trajectory constraints: accepted " << accepted_pose_pairs
+                               << ", skipped invalid " << skipped_invalid_pose_pairs << ", skipped origin "
+                               << skipped_origin_pose_pairs << ".\n\n";
+    ROS_INFO_STREAM(refine_pose_summary_stream.str());
+    io_utils_.writeResults(refine_pose_summary_stream);
+
     ROS_INFO_STREAM("Setting up image point constraints via correspondences for the refinement step.");
     // Set up image point constraints
-    for (auto correspondence_item = std::next(correspondences_.begin()); correspondence_item != correspondences_.end();
-         correspondence_item++) {
+    if (correspondences_.size() > 1) {
+        for (auto correspondence_item = std::next(correspondences_.begin()); correspondence_item != correspondences_.end();
+             correspondence_item++) {
         // Each correspondence_item holds a set of 2D-3D points. Go through each of them and apply the following steps
-        auto& correspondences_img = correspondence_item->first;
-        auto& correspondences_pcl = correspondence_item->second;
+            auto& correspondences_img = correspondence_item->first;
+            auto& correspondences_pcl = correspondence_item->second;
 
-        for (uint16_t i = 0; i < correspondences_img.cols(); i++) {
+            if (correspondences_img.rows() < 2 || correspondences_pcl.rows() < 3 ||
+                correspondences_img.cols() != correspondences_pcl.cols()) {
+                skipped_shape_mismatch_items++;
+                ROS_WARN_STREAM("Skipping one correspondence batch due to invalid image/point-cloud dimensions.");
+                continue;
+            }
+
+            for (Eigen::Index i = 0; i < correspondences_img.cols(); i++) {
             // 1.) Create image point measurement
-            auto pt2d = correspondences_img.col(i);
-            auto pt3d = correspondences_pcl.col(i);
+                const Point2d pt2d = correspondences_img.col(i).topRows(2).cast<double>();
+                const Point3d pt3d = correspondences_pcl.col(i).topRows(3).cast<double>();
 
-            auto img_measurement =
-                std::make_shared<ImgPointMeasurement>(pt2d.cast<double>(), Eigen::Matrix<double, 2, 2>::Identity());
+                if (!pt2d.allFinite() || !pt3d.allFinite()) {
+                    skipped_invalid_img_constraints++;
+                    continue;
+                }
+                if (!camera_model_->IsVisible(pt2d)) {
+                    skipped_out_of_bounds_constraints++;
+                    continue;
+                }
+                if (!HasPositiveCameraDepth(*refined_transform, pt3d)) {
+                    skipped_negative_depth_constraints++;
+                    continue;
+                }
 
-            // 2.) Create image point constraint
-            img_point_constraints.push_back(std::make_shared<ImgPointConstraint>(img_measurement, refined_transform,
-                                                                                 pt3d.cast<double>(), *camera_model_));
+                auto img_measurement =
+                    std::make_shared<ImgPointMeasurement>(pt2d, Eigen::Matrix<double, 2, 2>::Identity());
 
-            // 3.) Add image point constraint to the problem
-            AddImgPointConstraint(*img_point_constraints.back(), new ceres::CauchyLoss(0.000001));
+                // 2.) Create image point constraint
+                img_point_constraints.push_back(
+                    std::make_shared<ImgPointConstraint>(img_measurement, refined_transform, pt3d, *camera_model_));
+
+                // 3.) Add image point constraint to the problem
+                AddImgPointConstraint(*img_point_constraints.back(), new ceres::CauchyLoss(0.000001));
+                accepted_img_constraints++;
+            }
         }
+    }
+
+    std::stringstream refine_img_summary_stream;
+    refine_img_summary_stream << "Refined image point constraints: accepted " << accepted_img_constraints
+                              << ", skipped shape mismatch batches " << skipped_shape_mismatch_items
+                              << ", skipped invalid " << skipped_invalid_img_constraints
+                              << ", skipped out of bounds " << skipped_out_of_bounds_constraints
+                              << ", skipped non-positive depth " << skipped_negative_depth_constraints << ".\n\n";
+    ROS_INFO_STREAM(refine_img_summary_stream.str());
+    io_utils_.writeResults(refine_img_summary_stream);
+
+    const ros::Time refined_publish_stamp = camera_pose_msg.header.stamp.isZero() ? ros::Time::now()
+                                                                                   : camera_pose_msg.header.stamp;
+    if (accepted_pose_pairs == 0 || accepted_img_constraints == 0) {
+        std::stringstream skip_refine_stream;
+        skip_refine_stream << "Skipping refinement because the problem is unusable. Accepted trajectory constraints: "
+                           << accepted_pose_pairs << ", accepted image point constraints: "
+                           << accepted_img_constraints << ".";
+        publish_fallback_and_shutdown(skip_refine_stream.str(), refined_publish_stamp);
+        return;
     }
 
     // Obtain the refined transform
     optimizeProblem();
+    std::stringstream refine_solver_summary_stream;
+    refine_solver_summary_stream << "Refinement optimization summary: " << summary_.BriefReport() << "\n\n";
+    ROS_INFO_STREAM(refine_solver_summary_stream.str());
+    io_utils_.writeResults(refine_solver_summary_stream);
     static auto end_refine_timer = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double, std::ratio<1>> duration_refine = end_refine_timer - start_refine_timer;
     std::stringstream refine_duration_stream;
@@ -621,10 +788,38 @@ void Optimizer::ComputeRefinedTransform() {
     ROS_INFO_STREAM(overall_duration_stream.str());
     io_utils_.writeResults(overall_duration_stream);
 
+    if (!summary_.IsSolutionUsable() || summary_.termination_type == ceres::FAILURE) {
+        std::stringstream failed_refine_stream;
+        failed_refine_stream << "Refinement failed. Publishing the last valid transform instead. "
+                             << summary_.BriefReport();
+        publish_fallback_and_shutdown(failed_refine_stream.str(), refined_publish_stamp);
+        return;
+    }
+
     // Set up pose matrix from the optimized position and quaternion and invert the pose matrix
     Eigen::Matrix4d pose_matrix_inv = refined_transform->ToPoseMatrix().inverse();
     refined_transform->q = Eigen::Quaterniond(pose_matrix_inv.block<3, 3>(0, 0));
     refined_transform->p = Point3d(pose_matrix_inv.block<3, 1>(0, 3));
+    if (!IsValidPose(*refined_transform)) {
+        publish_fallback_and_shutdown("Refinement produced an invalid pose. Publishing the last valid transform instead.",
+                                      refined_publish_stamp);
+        return;
+    }
+
+    if (skip_initial_calibration_ && IsValidPose(last_valid_transform)) {
+        const auto refinement_drift = this->EvaluateNorms(last_valid_transform, *refined_transform);
+        if (refinement_drift.first > kMaxSeededRefinementTranslationDriftMeters ||
+            refinement_drift.second > kMaxSeededRefinementRotationDriftRad) {
+            std::stringstream seeded_guard_stream;
+            seeded_guard_stream << "Refinement drifted " << refinement_drift.first << " meters and "
+                                << refinement_drift.second * 180.0 / M_PI
+                                << " degrees away from the seeded transform. Restoring the seeded transform because "
+                                   "skip_initial_calibration is enabled.\n\n";
+            ROS_WARN_STREAM(seeded_guard_stream.str());
+            io_utils_.writeResults(seeded_guard_stream);
+            *refined_transform = last_valid_transform;
+        }
+    }
 
     // ----- LOGGING OF REFINED RESULTS
     std::stringstream refineStream, evalNormRefineStream, eval6dRefineStream;
@@ -642,37 +837,36 @@ void Optimizer::ComputeRefinedTransform() {
     io_utils_.writeResults(refineStream);
 
     // ----- LOGGING OF ERRORS
-    auto errorNorm = this->EvaluateNorms(*gt_extrinsics_, *refined_transform);
-    auto error6d = this->Evaluate6d(*gt_extrinsics_, *refined_transform);
-    eval6dRefineStream
-        << "The error (after optimization with correspondences) measured as translation vector (x,y,z) and euler "
-           "angles (zyx)\nTranslation: ("
-        << error6d.first.x() << ", " << error6d.first.y() << ", " << error6d.first.z() << ") meters\nRotation:    ("
-        << error6d.second.x() << ", " << error6d.second.y() << ", " << error6d.second.z() << ") radians"
-        << "\n\n";
-    ROS_INFO_STREAM(eval6dRefineStream.str());
-    io_utils_.writeResults(eval6dRefineStream);
+    if (gt_extrinsics_ != nullptr && IsValidPose(*gt_extrinsics_)) {
+        auto errorNorm = this->EvaluateNorms(*gt_extrinsics_, *refined_transform);
+        auto error6d = this->Evaluate6d(*gt_extrinsics_, *refined_transform);
+        eval6dRefineStream
+            << "The error (after optimization with correspondences) measured as translation vector (x,y,z) and euler "
+               "angles (zyx)\nTranslation: ("
+            << error6d.first.x() << ", " << error6d.first.y() << ", " << error6d.first.z()
+            << ") meters\nRotation:    (" << error6d.second.x() << ", " << error6d.second.y() << ", "
+            << error6d.second.z() << ") radians"
+            << "\n\n";
+        ROS_INFO_STREAM(eval6dRefineStream.str());
+        io_utils_.writeResults(eval6dRefineStream);
 
-    evalNormRefineStream
-        << "The error (after optimization with correspondences) measured as translation magnitude (delta_t) and "
-           "rotation magnitude (delta_r)\nTranslation magnitude: ("
-        << errorNorm.first << ") meters\nRotation magnitude:    (" << errorNorm.second
-        << ") radians\n                       (" << errorNorm.second * 180.0 / M_PI << ") degrees"
-        << "\n\n";
-    ROS_INFO_STREAM(evalNormRefineStream.str());
-    io_utils_.writeResults(evalNormRefineStream);
+        evalNormRefineStream
+            << "The error (after optimization with correspondences) measured as translation magnitude (delta_t) and "
+               "rotation magnitude (delta_r)\nTranslation magnitude: ("
+            << errorNorm.first << ") meters\nRotation magnitude:    (" << errorNorm.second
+            << ") radians\n                       (" << errorNorm.second * 180.0 / M_PI << ") degrees"
+            << "\n\n";
+        ROS_INFO_STREAM(evalNormRefineStream.str());
+        io_utils_.writeResults(evalNormRefineStream);
+    } else {
+        const std::string gt_skip_msg =
+            "Skipping GT-based refinement evaluation because /gt_extrinsics is missing or invalid.\n\n";
+        ROS_WARN_STREAM("Skipping GT-based refinement evaluation because /gt_extrinsics is missing or invalid.");
+        io_utils_.writeResults(gt_skip_msg);
+    }
 
     // Publish the refined transform
-    geometry_msgs::TransformStamped refined_transform_msg;
-    refined_transform_msg.transform.translation.x = refined_transform->p.x();
-    refined_transform_msg.transform.translation.y = refined_transform->p.y();
-    refined_transform_msg.transform.translation.z = refined_transform->p.z();
-    refined_transform_msg.transform.rotation.x = refined_transform->q.x();
-    refined_transform_msg.transform.rotation.y = refined_transform->q.y();
-    refined_transform_msg.transform.rotation.z = refined_transform->q.z();
-    refined_transform_msg.transform.rotation.w = refined_transform->q.w();
-    refined_transform_msg.header.stamp = camera_pose_msg.header.stamp;
-    refined_transform_pub_.publish(refined_transform_msg);
+    PublishTransform(refined_transform_pub_, *refined_transform, refined_publish_stamp);
 
     // Terminate this node. The job is done.
     ROS_INFO_STREAM("Done processing. Shutting down the optimizer node.");

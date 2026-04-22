@@ -43,7 +43,7 @@ struct PosePQ {
 
     // Sanity checker
     // cppcheck-suppress unusedFunction
-    bool IsAtOrigin() {
+    bool IsAtOrigin() const {
         if (p[0] == 0 && p[1] == 0 && p[2] == 0 && q.x() == 0 && q.y() == 0 && q.z() == 0 && q.w() == 1) {
             return true;
         }

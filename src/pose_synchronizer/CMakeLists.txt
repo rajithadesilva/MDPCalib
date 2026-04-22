@@ -7,6 +7,7 @@ add_compile_options(-std=c++17 -Wall)
 # Get the information about this package's buildtime dependencies
 find_package(catkin REQUIRED COMPONENTS
     roscpp
+    rospy
     rosbag
     std_msgs
     nav_msgs
@@ -16,9 +17,24 @@ find_package(catkin REQUIRED COMPONENTS
     tf2_geometry_msgs
     tf2_sensor_msgs
     calib_msgs
+    cv_bridge
 )
 
-catkin_package()
+catkin_package(
+  CATKIN_DEPENDS
+    roscpp
+    rospy
+    rosbag
+    std_msgs
+    nav_msgs
+    geometry_msgs
+    sensor_msgs
+    message_filters
+    tf2_geometry_msgs
+    tf2_sensor_msgs
+    calib_msgs
+    cv_bridge
+)
 
 include_directories(
     ${catkin_INCLUDE_DIRS}
@@ -38,4 +54,10 @@ add_executable(${PROJECT_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 target_link_libraries(${PROJECT_NAME}
   ${catkin_LIBRARIES}
   yaml-cpp
+)
+
+catkin_install_python(PROGRAMS
+  scripts/blt_camera_adapter.py
+  scripts/publish_gt_from_tf.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<launch>
+
+  <param name="/use_sim_time" value="true" />
+
+  <arg name="rosbag" default="april_smaller_bag_0.bag" />
+  <arg name="path" default="/data/blt/" />
+  <arg name="rate" default="1" />
+  <arg name="publish_gt_from_tf" default="true" />
+  <arg name="tf_source_frame" default="os_sensor" />
+  <arg name="tf_target_frame" default="front_left_camera_optical_frame" />
+  <arg name="tf_timeout_sec" default="30" />
+  <!-- Defaults are the front_left_camera_optical_frame pose expressed in the
+       os_sensor frame, because the optimizer uses the optical camera pose in
+       the LiDAR frame for reprojection. -->
+  <arg name="gt_tx" default="0.443" />
+  <arg name="gt_ty" default="0.0" />
+  <arg name="gt_tz" default="-0.237" />
+  <arg name="gt_qx" default="-0.5084265376725761" />
+  <arg name="gt_qy" default="0.508426537672576" />
+  <arg name="gt_qz" default="-0.4914289936402579" />
+  <arg name="gt_qw" default="0.491428993640258" />
+
+  <node pkg="rosbag" type="play" name="player" output="screen"
+    args="--clock $(arg path)$(arg rosbag) -r $(arg rate)" />
+
+  <node pkg="pose_synchronizer" type="blt_camera_adapter.py" name="blt_camera_adapter" output="screen">
+    <param name="input_image_topic" value="/front/zed_node/rgb/image_rect_color/compressed" />
+    <param name="input_camera_info_topic" value="/front/zed_node/rgb/camera_info" />
+    <param name="output_image_topic" value="/camera_undistorted/image" />
+    <param name="output_camera_info_topic" value="/camera_undistorted/camera_info" />
+  </node>
+
+  <arg name="topic_name" default="/gt_extrinsics" />
+  <node pkg="pose_synchronizer" type="publish_gt_from_tf.py" name="publish_gt_from_tf" output="screen"
+    if="$(arg publish_gt_from_tf)">
+    <param name="source_frame" value="$(arg tf_source_frame)" />
+    <param name="target_frame" value="$(arg tf_target_frame)" />
+    <param name="topic_name" value="$(arg topic_name)" />
+    <param name="timeout_sec" value="$(arg tf_timeout_sec)" />
+  </node>
+  <node pkg="rostopic" type="rostopic" name="rostopic_pub_node" output="screen"
+    unless="$(arg publish_gt_from_tf)"
+    args="pub $(arg topic_name) --once geometry_msgs/PoseStamped '{header:{stamp: now, frame_id: ''}, pose: {position: {x: $(arg gt_tx), y: $(arg gt_ty), z: $(arg gt_tz)}, orientation: {x: $(arg gt_qx), y: $(arg gt_qy), z: $(arg gt_qz), w: $(arg gt_qw)}}}'" />
+
+</launch>

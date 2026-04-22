@@ -4,22 +4,25 @@ optimization:
   number_poses: 1000 # Optimize using N poses
   starting_pose: 15 # Skip the first N received poses
   number_image_pcl_pairs: 100 # Refine using correspondences from N pairs
-  skip_initial_calibration: true # Set to true to skip hand-eye calibration and use values below
+  skip_initial_calibration: false # BLT currently seeds refinement from a known LiDAR -> camera optical transform
   initial_calibration:
-    tx: -0.02722
-    ty: -0.00068
-    tz: -0.07292
-    qw: 0.4998
-    qx: -0.5024
-    qy: 0.4976
-    qz: -0.5002
+    # BLT front camera uses a body-style frame in TF (x forward, z up), but
+    # reprojection expects the optical frame. These values are the LiDAR ->
+    # front_left_camera_optical_frame seed used by CMRNext and the optimizer.
+    tx: 0.443
+    ty: 0.0
+    tz: -0.237
+    qw: 0.491428993640258
+    qx: -0.5084265376725761
+    qy: 0.508426537672576
+    qz: -0.4914289936402579
 
 cmrnext:
   amount_correspondences: 5 # Percentage of correspondences per pair. Value in [0, 100].
   rotation_threshold: 50 # [Deg] Img-Pcl pairs with an estimated yaw (using LiDAR odometry) above this threshold are not processed.
   use_error_map_sampling: true # Set to true to use precomputed error maps for weighted sampling
-  error_map_u_dir: "/data/flow_vis/flow_vis_kitti_00/u" # Directory with per-frame u-error .npz files
-  error_map_v_dir: "/data/flow_vis/flow_vis_kitti_00/v" # Directory with per-frame v-error .npz files
+  error_map_u_dir: "/data/flow_vis/flow_vis_blt_april/u"
+  error_map_v_dir: "/data/flow_vis/flow_vis_blt_april/v"
 
 io:
   cache_folder: "/data/cache"

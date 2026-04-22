@@ -126,7 +126,7 @@ Visualization Manager:
         Value: true
       Enabled: true
       Keep: 1000000
-      Name: LiDAR Path
+      Name: LiDAR Path (FAST-LO world)
       Position Tolerance: 0.10000000149011612
       Queue Size: 10
       Shape:
@@ -164,7 +164,7 @@ Visualization Manager:
       Length: 0.30000001192092896
       Line Style: Lines
       Line Width: 0.029999999329447746
-      Name: Camera Path
+      Name: Camera Path (ORB world)
       Offset:
         X: 0
         Y: 0

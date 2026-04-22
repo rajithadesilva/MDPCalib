@@ -112,6 +112,12 @@ void IOUtils::writeResults(std::stringstream& stream) {
     resultsFile.close();
 }
 
+void IOUtils::writeResults(const std::string& text) {
+    std::stringstream stream;
+    stream << text;
+    writeResults(stream);
+}
+
 void IOUtils::writeImage(const sensor_msgs::ImageConstPtr& img_msg) {
     // Convert ROS sensor_msgs::Image into cv::Mat
     cv_bridge::CvImagePtr imgPtr = cv_bridge::toCvCopy(img_msg);

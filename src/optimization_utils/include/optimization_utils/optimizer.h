@@ -87,17 +87,17 @@ class Optimizer : public CeresBase {
 
     double GetQuatDist(const Eigen::Quaterniond& q1, const Eigen::Quaterniond& q2);
 
-    ros::Subscriber* synced_poses_filename_subscriber_;
-    ros::Subscriber* gt_extrinsics_subscriber_;
-    ros::Subscriber* correspondences_subscriber_;
-    ros::Subscriber* camera_info_subscriber_;
-    ros::Subscriber* visu_init_subscriber_;
+    ros::Subscriber* synced_poses_filename_subscriber_ = nullptr;
+    ros::Subscriber* gt_extrinsics_subscriber_ = nullptr;
+    ros::Subscriber* correspondences_subscriber_ = nullptr;
+    ros::Subscriber* camera_info_subscriber_ = nullptr;
+    ros::Subscriber* visu_init_subscriber_ = nullptr;
     ros::Publisher initial_transform_pub_;
     ros::Publisher initial_transform_meta_pub_;
     ros::Publisher refined_transform_pub_;
 
     // Camera model for reprojection residuals
-    CameraModelPinhole* camera_model_;
+    CameraModelPinhole* camera_model_ = nullptr;
 
     // Cache the odometry poses
     std::vector<std::pair<std::string, int>> synced_poses_filenames_;
